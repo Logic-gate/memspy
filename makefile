@@ -3,7 +3,7 @@ CFLAGS = -Wall -O2
 LDFLAGS = -lrt
 
 TARGET = memspy
-SRCS = src/main.c src/memory_injector.c src/memory_reader.c
+SRCS = src/main.c src/memory_injector.c src/memory_reader.c src/memory_dump.c
 OBJS = $(SRCS:.c=.o)
 
 
