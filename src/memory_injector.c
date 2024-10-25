@@ -102,10 +102,10 @@ void inject_string_value(pid_t pid, unsigned long addr, const char *str, const c
     }
 }
 
-// Realtime memory monitoring for a single address
+// Realtime memory monitoring for a single address with user-provided length
 void monitor_memory_realtime(pid_t pid, unsigned long addr, size_t length, int decode_ascii, const char *log_file, int verbose) {
-    // Added length 
-    char log_msg[BUFFER_SIZE];
+    // Ensure BUFFER_SIZE is large enough to handle logs for long memory reads
+    char log_msg[BUFFER_SIZE * 2];  // Buffer large enough to store log messages for larger memory regions
     unsigned char *previous_data = malloc(length);
     unsigned char *current_data = malloc(length);
 
@@ -114,8 +114,35 @@ void monitor_memory_realtime(pid_t pid, unsigned long addr, size_t length, int d
         return;
     }
 
-    printf("%s " COLOR_GREEN "[INFO] Real-time monitoring memory at address: 0x%lx\n" COLOR_RESET, get_timestamp(), addr);
+    // Correct log message: display the actual length provided by the user
+    printf("%s " COLOR_GREEN "[INFO] Real-time monitoring memory at address: 0x%lx with length %zu bytes\n" COLOR_RESET, get_timestamp(), addr, length);
 
+    // Initialize previous_data with current memory content to avoid false positives
+    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
+        perror(COLOR_RED "ptrace attach failed" COLOR_RESET);
+        free(previous_data);
+        free(current_data);
+        return;
+    }
+    waitpid(pid, NULL, 0);
+
+    for (size_t i = 0; i < length; i += sizeof(long)) {
+        long data = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i), NULL);
+        if (errno != 0) {
+            perror(COLOR_RED "ptrace peekdata failed" COLOR_RESET);
+            break;
+        }
+        memcpy(previous_data + i, &data, sizeof(long));
+    }
+
+    if (ptrace(PTRACE_DETACH, pid, NULL, NULL) == -1) {
+        perror(COLOR_RED "ptrace detach failed" COLOR_RESET);
+        free(previous_data);
+        free(current_data);
+        return;
+    }
+
+    // Monitoring loop
     while (1) {
         if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) == -1) {
             perror(COLOR_RED "ptrace attach failed" COLOR_RESET);
@@ -125,6 +152,7 @@ void monitor_memory_realtime(pid_t pid, unsigned long addr, size_t length, int d
         }
         waitpid(pid, NULL, 0);
 
+        // Read the memory block in chunks of sizeof(long)
         for (size_t i = 0; i < length; i += sizeof(long)) {
             long data = ptrace(PTRACE_PEEKDATA, pid, (void *)(addr + i), NULL);
             if (errno != 0) {
@@ -134,33 +162,34 @@ void monitor_memory_realtime(pid_t pid, unsigned long addr, size_t length, int d
             memcpy(current_data + i, &data, sizeof(long));
         }
 
-        // Compare changes
+        // Compare memory
         if (memcmp(current_data, previous_data, length) != 0) {
-            snprintf(log_msg, BUFFER_SIZE, "[REALTIME] Change detected at 0x%lx", addr);
+            snprintf(log_msg, sizeof(log_msg), "[REALTIME] Change detected at 0x%lx", addr);
             if (log_file) log_message(log_file, log_msg);
 
             printf("%s " COLOR_YELLOW "[CHANGE] Memory at " COLOR_CYAN "0x%lx" COLOR_RESET " has changed\n", get_timestamp(), addr);
             
-            // Check decode_ascii flag
+            // Output the new memory content
             if (decode_ascii) {
                 printf(COLOR_MAGENTA "New ASCII data: ");
                 for (size_t i = 0; i < length; i++) {
                     unsigned char byte = current_data[i];
                     if (byte >= 32 && byte <= 126) {
-                        printf("%c", byte);  
+                        printf("%c", byte);  // Printable ASCII
                     } else {
-                        printf(".");  
+                        printf(".");  // Non-printable bytes
                     }
                 }
                 printf(COLOR_RESET "\n");
             } else {
                 printf(COLOR_GREEN "New Hex data: ");
                 for (size_t i = 0; i < length; i++) {
-                    printf("%02x ", current_data[i]);
+                    printf("%02x ", current_data[i]);  // Print byte in hex
                 }
                 printf(COLOR_RESET "\n");
             }
 
+            // Update previous_data with the new values
             memcpy(previous_data, current_data, length);
         }
 
@@ -171,12 +200,14 @@ void monitor_memory_realtime(pid_t pid, unsigned long addr, size_t length, int d
             return;
         }
 
-        sleep(1);  // I found that 1 second is sufficient
+        sleep(1);  // Sleep for 1 second before checking again
     }
 
     free(previous_data);
     free(current_data);
 }
+
+
 
 // Monitor a memory range in real-time
 void monitor_memory_range(pid_t pid, unsigned long start_addr, unsigned long end_addr, const char *log_file, int verbose) {

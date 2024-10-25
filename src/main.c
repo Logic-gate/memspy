@@ -1,11 +1,14 @@
 #include "memory_injector.h"
 #include "memory_reader.h"
-#include <stdlib.h> 
+#include "memory_dump.h"
+#include <stdlib.h>
 #include <string.h>
 #include <sys/ptrace.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <ctype.h>
 
+// Function to print help message
 void print_help() {
     printf(COLOR_GREEN "Usage:\n" COLOR_RESET);
     printf(COLOR_CYAN "  ./memspy <pid> [options]\n" COLOR_RESET);
@@ -18,9 +21,26 @@ void print_help() {
     printf(COLOR_YELLOW "  --realtime       " COLOR_RESET "Enable real-time memory reading to continuously detect and print memory changes.\n");
     printf(COLOR_YELLOW "  --ascii          " COLOR_RESET "Decode memory as ASCII when using --read or --realtime. Default is hexadecimal.\n");
     printf(COLOR_YELLOW "  --spy            " COLOR_RESET "Monitor all readable memory regions for changes.\n");
+    printf(COLOR_YELLOW "  --dump           " COLOR_RESET "Dump memory contents from the specified address or range.\n");
+    printf(COLOR_YELLOW "  --combine        " COLOR_RESET "Combine all memory dumps into a single dump file without separation.\n");
     printf(COLOR_YELLOW "  --log            " COLOR_RESET "Enable logging. If no file is specified, it will create a log file.\n");
     printf(COLOR_YELLOW "  --verbose        " COLOR_RESET "Enable detailed logging for memory changes, injection, or reading.\n");
+    printf(COLOR_YELLOW "  --length         " COLOR_RESET "Specify the length (in bytes) for memory operations like --read or --dump.\n");
     printf(COLOR_YELLOW "  --help           " COLOR_RESET "Show this help message.\n");
+}
+
+// Validate and set length
+int set_length_from_argument(const char *arg, size_t *length) {
+    for (int i = 0; arg[i] != '\0'; i++) {
+        if (!isdigit(arg[i])) {
+            return 0;  
+        }
+    }
+
+    // Convert the argument to size_t and update the length
+    // Length is Broken
+    *length = (size_t)atol(arg);
+    return 1;  // Return 1 if successful
 }
 
 int main(int argc, char *argv[]) {
@@ -40,10 +60,13 @@ int main(int argc, char *argv[]) {
     int realtime_mode = 0;
     int log_enabled = 0;
     int spy_mode = 0;
+    int dump_mode = 0;
+    int combine_mode = 0;
     long inject_value_data = 0;
-    size_t length = 64;  // Default mem length
+    size_t length = 64;  // Will be overwritten
     char *inject_string = NULL;
     char log_file[256] = {0};
+
 
     for (int i = 2; i < argc; i++) {
         if (strcmp(argv[i], "--verbose") == 0) {
@@ -73,7 +96,10 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--read") == 0) {
             read_memory_mode = 1;
             if (i + 1 < argc) {
-                length = atol(argv[++i]);
+                if (!set_length_from_argument(argv[++i], &length)) {
+                    fprintf(stderr, COLOR_RED "Error: Invalid value for --length\n" COLOR_RESET);
+                    return 1;
+                }
             }
         }
         if (strcmp(argv[i], "--realtime") == 0) {
@@ -88,17 +114,37 @@ int main(int argc, char *argv[]) {
         if (strcmp(argv[i], "--spy") == 0) {
             spy_mode = 1;
         }
+        if (strcmp(argv[i], "--dump") == 0) {
+            dump_mode = 1;
+        }
+        if (strcmp(argv[i], "--combine") == 0) {
+            combine_mode = 1;
+        }
+        if (strcmp(argv[i], "--length") == 0) {
+            if (i + 1 < argc) {
+                if (!set_length_from_argument(argv[++i], &length)) {
+                    fprintf(stderr, COLOR_RED "Error: Invalid value for --length\n" COLOR_RESET);
+                    return 1;
+                }
+            } else {
+                fprintf(stderr, COLOR_RED "Error: --length requires a numeric value\n" COLOR_RESET);
+                return 1;
+            }
+        }
     }
 
-    if (!monitor && !inject_mode && !inject_string_mode && !spy_mode && !read_memory_mode && !realtime_mode) {
+    // If no action flags are set, show memory map
+    if (!monitor && !inject_mode && !inject_string_mode && !spy_mode && !read_memory_mode && !realtime_mode && !dump_mode) {
         print_memory_map(pid);
         return 0;
     }
 
+    // Generate log file name if logging is enabled
     if (log_enabled) {
         generate_log_filename(log_file, pid);
     }
 
+    // Handle read or realtime memory monitoring
     if (read_memory_mode || realtime_mode) {
         unsigned long addr = 0;
         if (argc > 2 && sscanf(argv[2], "%lx", &addr) == 1) {
@@ -114,11 +160,30 @@ int main(int argc, char *argv[]) {
         }
     }
 
+    // Handle spy mode
     if (spy_mode) {
         monitor_all_memory_with_changes(pid, log_enabled ? log_file : NULL, verbose);
         return 0;
     }
 
+    // Handle memory dump
+    if (dump_mode) {
+        unsigned long addr = 0;
+        unsigned long end_addr = 0;
+
+        if (argc > 2 && strstr(argv[2], "-")) {
+            sscanf(argv[2], "%lx-%lx", &addr, &end_addr);
+            memory_dump(pid, addr, end_addr, length, decode_ascii, combine_mode); 
+        } else if (argc > 2 && sscanf(argv[2], "%lx", &addr) == 1) {
+            memory_dump(pid, addr, 0, length, decode_ascii, combine_mode);  // Single address
+        } else {
+            fprintf(stderr, COLOR_RED "Error: Invalid address format for --dump.\n" COLOR_RESET);
+            return 1;
+        }
+        return 0;
+    }
+
+    // Handle inject, monitor, and inject-string
     if (monitor || inject_mode || inject_string_mode) {
         if (argc > 2 && strstr(argv[2], "-")) {
             unsigned long start_addr = 0, end_addr = 0;
